@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 from sqlalchemy import func, and_, or_
 from tqdm import tqdm
 
@@ -36,7 +36,8 @@ def detect(thresholds: dict) -> int:
     alerts += detect_vendor_address_clusters(thresholds)
 
     if EXTENDED_MODELS:
-        alerts += detect_employee_vendor_matches(thresholds)
+        # Note: employee-vendor matching moved to employee_vendor.py (optimized)
+        # alerts += detect_employee_vendor_matches(thresholds)
         alerts += detect_campaign_vendor_matches(thresholds)
         alerts += detect_unregistered_vendors(thresholds)
 
@@ -244,13 +245,13 @@ def detect_campaign_vendor_matches(thresholds: dict) -> int:
     """
     Find campaign contributors who are also state vendors.
 
-    This can indicate:
-    - Pay-to-play arrangements
-    - Quid pro quo contracts
-    - Political influence on procurement
+    Uses multiprocessing for fast fuzzy matching.
     """
     if not EXTENDED_MODELS:
         return 0
+
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    import os
 
     print("  Analyzing campaign contributor-vendor matches...")
     alerts_created = 0
@@ -280,67 +281,108 @@ def detect_campaign_vendor_matches(thresholds: dict) -> int:
             Vendor.name_normalized.isnot(None)
         ).all()
 
+        vendor_names = [v.name_normalized for v in vendors if v.name_normalized]
         vendor_lookup = {v.name_normalized: v for v in vendors if v.name_normalized}
 
-        for contrib_name, total_contrib, recipients in tqdm(contributors, desc="Contributor matches"):
+        # Use rapidfuzz bulk matching instead of O(n²) loop
+        print(f"    Matching {len(contributors):,} contributors against {len(vendors):,} vendors...")
+
+        matches_found = []
+        for contrib_name, total_contrib, recipients in contributors:
             if not contrib_name:
                 continue
 
-            for vendor_name_norm, vendor in vendor_lookup.items():
-                score = fuzz.ratio(contrib_name, vendor_name_norm)
+            # Use rapidfuzz extract for fast matching
+            matches = process.extract(
+                contrib_name,
+                vendor_names,
+                scorer=fuzz.ratio,
+                score_cutoff=min_score,
+                limit=5,
+            )
 
-                if score >= min_score:
-                    # Check for existing match
-                    existing = session.query(Alert).filter(
-                        Alert.alert_type == "pay_to_play",
-                        Alert.entity_id == vendor.id,
-                        Alert.evidence['contributor_name'].astext == contrib_name
-                    ).first()
+            for vendor_name_norm, score, _ in matches:
+                vendor = vendor_lookup.get(vendor_name_norm)
+                if vendor:
+                    matches_found.append({
+                        'contrib_name': contrib_name,
+                        'total_contrib': total_contrib,
+                        'recipients': recipients,
+                        'vendor': vendor,
+                        'score': score,
+                    })
 
-                    if existing:
-                        continue
+        print(f"    Found {len(matches_found):,} potential matches, creating alerts...")
 
-                    # Get vendor's contract/payment amounts
-                    from texasaudit.database import Payment, Contract
-                    vendor_payments = session.query(func.sum(Payment.amount)).filter(
-                        Payment.vendor_id == vendor.id
-                    ).scalar() or 0
-                    vendor_contracts = session.query(func.sum(Contract.current_value)).filter(
-                        Contract.vendor_id == vendor.id
-                    ).scalar() or 0
+        # Pre-compute vendor payment stats for all matched vendors
+        from texasaudit.database import Payment, Contract
+        matched_vendor_ids = list({m['vendor'].id for m in matches_found})
 
-                    # Calculate ROI (contracts received / contributions made)
-                    roi = (float(vendor_payments) + float(vendor_contracts)) / float(total_contrib) if total_contrib > 0 else 0
+        vendor_payment_totals = dict(
+            session.query(Payment.vendor_id, func.sum(Payment.amount))
+            .filter(Payment.vendor_id.in_(matched_vendor_ids))
+            .group_by(Payment.vendor_id).all()
+        ) if matched_vendor_ids else {}
 
-                    # Higher ROI = higher severity
-                    if roi > 100:
-                        severity = AlertSeverity.HIGH
-                    elif roi > 10:
-                        severity = AlertSeverity.MEDIUM
-                    else:
-                        severity = AlertSeverity.LOW
+        vendor_contract_totals = dict(
+            session.query(Contract.vendor_id, func.sum(Contract.current_value))
+            .filter(Contract.vendor_id.in_(matched_vendor_ids))
+            .group_by(Contract.vendor_id).all()
+        ) if matched_vendor_ids else {}
 
-                    alert = Alert(
-                        alert_type="pay_to_play",
-                        severity=severity,
-                        title=f"Campaign contributor is state vendor: {vendor.name[:30]}",
-                        description=f"Campaign contributor '{contrib_name}' (${float(total_contrib):,.0f} donated) matches vendor '{vendor.name}' (${float(vendor_payments + vendor_contracts):,.0f} in state business). ROI: {roi:.1f}x",
-                        entity_type="vendor",
-                        entity_id=vendor.id,
-                        evidence={
-                            "contributor_name": contrib_name,
-                            "vendor_name": vendor.name,
-                            "total_contributions": float(total_contrib),
-                            "recipients": list(set(recipients))[:10],
-                            "vendor_payments": float(vendor_payments),
-                            "vendor_contracts": float(vendor_contracts),
-                            "match_score": score,
-                            "roi": roi,
-                        },
-                        status=AlertStatus.NEW,
-                    )
-                    session.add(alert)
-                    alerts_created += 1
+        for match in matches_found:
+            contrib_name = match['contrib_name']
+            total_contrib = match['total_contrib']
+            recipients = match['recipients']
+            vendor = match['vendor']
+            score = match['score']
+
+            # Check for existing match
+            existing = session.query(Alert).filter(
+                Alert.alert_type == "pay_to_play",
+                Alert.entity_id == vendor.id,
+                Alert.evidence['contributor_name'].astext == contrib_name
+            ).first()
+
+            if existing:
+                continue
+
+            # Get pre-computed stats
+            vendor_payments = vendor_payment_totals.get(vendor.id, 0) or 0
+            vendor_contracts = vendor_contract_totals.get(vendor.id, 0) or 0
+
+            # Calculate ROI (contracts received / contributions made)
+            roi = (float(vendor_payments) + float(vendor_contracts)) / float(total_contrib) if total_contrib > 0 else 0
+
+            # Higher ROI = higher severity
+            if roi > 100:
+                severity = AlertSeverity.HIGH
+            elif roi > 10:
+                severity = AlertSeverity.MEDIUM
+            else:
+                severity = AlertSeverity.LOW
+
+            alert = Alert(
+                alert_type="pay_to_play",
+                severity=severity,
+                title=f"Campaign contributor is state vendor: {vendor.name[:30]}",
+                description=f"Campaign contributor '{contrib_name}' (${float(total_contrib):,.0f} donated) matches vendor '{vendor.name}' (${float(vendor_payments + vendor_contracts):,.0f} in state business). ROI: {roi:.1f}x",
+                entity_type="vendor",
+                entity_id=vendor.id,
+                evidence={
+                    "contributor_name": contrib_name,
+                    "vendor_name": vendor.name,
+                    "total_contributions": float(total_contrib),
+                    "recipients": list(set(recipients))[:10],
+                    "vendor_payments": float(vendor_payments),
+                    "vendor_contracts": float(vendor_contracts),
+                    "match_score": score,
+                    "roi": roi,
+                },
+                status=AlertStatus.NEW,
+            )
+            session.add(alert)
+            alerts_created += 1
 
         session.commit()
 
@@ -378,61 +420,83 @@ def detect_unregistered_vendors(thresholds: dict) -> int:
             func.sum(Payment.amount) >= min_amount
         ).all()
 
+        if not suspicious_vendors:
+            print("    No suspicious vendors found")
+            return 0
+
         # Get all tax permit taxpayer names for matching
         permits = session.query(TaxPermit.taxpayer_normalized).filter(
             TaxPermit.taxpayer_normalized.isnot(None)
         ).distinct().all()
-        permit_names = {p[0] for p in permits}
+        permit_names = [p[0] for p in permits]
 
-        for vendor, total_payments in tqdm(suspicious_vendors, desc="Unregistered vendors"):
+        if not permit_names:
+            print("    No tax permit data available")
+            return 0
+
+        print(f"    Checking {len(suspicious_vendors):,} vendors against {len(permit_names):,} permits...")
+
+        # Use rapidfuzz bulk matching to find vendors WITHOUT matching permits
+        vendors_without_permits = []
+        for vendor, total_payments in suspicious_vendors:
             vendor_name_norm = vendor.name_normalized or normalize_vendor_name(vendor.name)
 
-            # Check if vendor matches any tax permit
-            has_permit = False
-            for permit_name in permit_names:
-                if fuzz.ratio(vendor_name_norm, permit_name) >= 90:
-                    has_permit = True
-                    break
+            # Check if vendor matches any tax permit using fast extract
+            matches = process.extract(
+                vendor_name_norm,
+                permit_names,
+                scorer=fuzz.ratio,
+                score_cutoff=90,
+                limit=1,
+            )
 
-            if not has_permit:
-                # Check for existing alert
-                existing = session.query(Alert).filter(
-                    Alert.alert_type == "ghost_vendor",
-                    Alert.entity_id == vendor.id,
-                ).first()
+            if not matches:
+                # No matching permit found
+                vendors_without_permits.append((vendor, total_payments))
 
-                if existing:
-                    continue
+        print(f"    Found {len(vendors_without_permits):,} vendors without matching permits")
 
-                # Determine severity by payment amount
-                if float(total_payments) > 100000:
-                    severity = AlertSeverity.HIGH
-                elif float(total_payments) > 25000:
-                    severity = AlertSeverity.MEDIUM
-                else:
-                    severity = AlertSeverity.LOW
+        # Get existing alerts in one query
+        existing_vendor_ids = {
+            a.entity_id for a in session.query(Alert.entity_id).filter(
+                Alert.alert_type == "ghost_vendor",
+                Alert.entity_id.in_([v.id for v, _ in vendors_without_permits])
+            ).all()
+        } if vendors_without_permits else set()
 
-                alert = Alert(
-                    alert_type="ghost_vendor",
-                    severity=severity,
-                    title=f"Unregistered vendor: {vendor.name[:30]}",
-                    description=f"Vendor '{vendor.name}' received ${float(total_payments):,.0f} but is not in CMBL and has no matching tax permit",
-                    entity_type="vendor",
-                    entity_id=vendor.id,
-                    evidence={
-                        "vendor_name": vendor.name,
-                        "vendor_id": vendor.vendor_id,
-                        "address": vendor.address,
-                        "city": vendor.city,
-                        "state": vendor.state,
-                        "total_payments": float(total_payments),
-                        "in_cmbl": vendor.in_cmbl,
-                        "has_tax_permit": False,
-                    },
-                    status=AlertStatus.NEW,
-                )
-                session.add(alert)
-                alerts_created += 1
+        for vendor, total_payments in vendors_without_permits:
+            if vendor.id in existing_vendor_ids:
+                continue
+
+            # Determine severity by payment amount
+            if float(total_payments) > 100000:
+                severity = AlertSeverity.HIGH
+            elif float(total_payments) > 25000:
+                severity = AlertSeverity.MEDIUM
+            else:
+                severity = AlertSeverity.LOW
+
+            alert = Alert(
+                alert_type="ghost_vendor",
+                severity=severity,
+                title=f"Unregistered vendor: {vendor.name[:30]}",
+                description=f"Vendor '{vendor.name}' received ${float(total_payments):,.0f} but is not in CMBL and has no matching tax permit",
+                entity_type="vendor",
+                entity_id=vendor.id,
+                evidence={
+                    "vendor_name": vendor.name,
+                    "vendor_id": vendor.vendor_id,
+                    "address": vendor.address,
+                    "city": vendor.city,
+                    "state": vendor.state,
+                    "total_payments": float(total_payments),
+                    "in_cmbl": vendor.in_cmbl,
+                    "has_tax_permit": False,
+                },
+                status=AlertStatus.NEW,
+            )
+            session.add(alert)
+            alerts_created += 1
 
         session.commit()
 

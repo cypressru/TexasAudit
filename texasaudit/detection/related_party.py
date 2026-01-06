@@ -221,6 +221,8 @@ def _detect_vendor_networks(
 
 def _detect_employee_vendor_contributor_links(session) -> int:
     """Detect triangular relationships: employee-vendor-campaign contributor."""
+    from rapidfuzz import fuzz, process
+
     alerts_created = 0
 
     # Find employee-vendor matches
@@ -229,43 +231,88 @@ def _detect_employee_vendor_contributor_links(session) -> int:
         EntityMatch.entity_type_2 == "vendor",
     ).all()
 
+    if not employee_vendor_matches:
+        return 0
+
+    # Pre-load all employees and vendors for these matches
+    match_employee_ids = [m.entity_id_1 for m in employee_vendor_matches]
+    match_vendor_ids = [m.entity_id_2 for m in employee_vendor_matches]
+
+    employees_by_id = {e.id: e for e in session.query(Employee).filter(
+        Employee.id.in_(match_employee_ids)
+    ).all()}
+
+    vendors_by_id = {v.id: v for v in session.query(Vendor).filter(
+        Vendor.id.in_(match_vendor_ids)
+    ).all()}
+
+    # Pre-load all campaign contributions grouped by normalized name
+    contributions_by_name = defaultdict(list)
+    all_contributions = session.query(CampaignContribution).filter(
+        CampaignContribution.contributor_normalized.isnot(None)
+    ).all()
+
+    for c in all_contributions:
+        contributions_by_name[c.contributor_normalized].append(c)
+
+    contributor_names = list(contributions_by_name.keys())
+
+    # Pre-compute payment stats for all matched vendors
+    payment_stats = dict(
+        session.query(
+            Payment.vendor_id,
+            func.sum(Payment.amount).label("total"),
+            func.count(Payment.id).label("count"),
+        ).filter(
+            Payment.vendor_id.in_(match_vendor_ids)
+        ).group_by(Payment.vendor_id).all()
+    )
+
+    print(f"      Checking {len(employee_vendor_matches):,} matches against {len(contributor_names):,} contributors...")
+
     for match in employee_vendor_matches:
-        employee = session.get(Employee, match.entity_id_1)
-        vendor = session.get(Vendor, match.entity_id_2)
+        employee = employees_by_id.get(match.entity_id_1)
+        vendor = vendors_by_id.get(match.entity_id_2)
 
         if not employee or not vendor:
             continue
 
-        # Check if vendor name appears in campaign contributions
+        # Use fuzzy matching to find similar contributor names
         vendor_name_normalized = normalize_vendor_name(vendor.name)
 
-        # Search for campaign contributions by this name
-        contributions = session.query(CampaignContribution).filter(
-            CampaignContribution.contributor_normalized.ilike(f"%{vendor_name_normalized}%")
-        ).all()
+        # Find matching contributor names
+        fuzzy_matches = process.extract(
+            vendor_name_normalized,
+            contributor_names,
+            scorer=fuzz.ratio,
+            score_cutoff=80,  # Lower threshold to catch variations
+            limit=5,
+        )
 
-        if not contributions:
+        if not fuzzy_matches:
+            continue
+
+        # Gather all contributions from matching names
+        matching_contributions = []
+        for contrib_name, score, _ in fuzzy_matches:
+            matching_contributions.extend(contributions_by_name[contrib_name])
+
+        if not matching_contributions:
             continue
 
         # Calculate total contributions
         total_contributions = sum(
-            float(c.contribution_amount or 0) for c in contributions
+            float(c.contribution_amount or 0) for c in matching_contributions
         )
 
-        # Get payment statistics for vendor
-        payment_stats = session.query(
-            func.sum(Payment.amount).label("total"),
-            func.count(Payment.id).label("count"),
-        ).filter(
-            Payment.vendor_id == vendor.id
-        ).first()
-
-        if not payment_stats or not payment_stats.total:
+        # Get pre-computed payment stats
+        stats = payment_stats.get(vendor.id)
+        if not stats or not stats.total:
             continue
 
         # Find which officials received contributions
         recipients = defaultdict(Decimal)
-        for c in contributions:
+        for c in matching_contributions:
             recipients[c.filer_name] += c.contribution_amount or Decimal("0")
 
         evidence = {
@@ -277,9 +324,9 @@ def _detect_employee_vendor_contributor_links(session) -> int:
             "vendor_name": vendor.name,
             "match_type": match.match_type,
             "match_confidence": float(match.confidence_score or 0),
-            "vendor_payments": float(payment_stats.total),
-            "payment_count": payment_stats.count,
-            "contribution_count": len(contributions),
+            "vendor_payments": float(stats.total),
+            "payment_count": stats.count,
+            "contribution_count": len(matching_contributions),
             "total_contributions": total_contributions,
             "contribution_recipients": [
                 {"name": name, "amount": float(amount)}
@@ -292,7 +339,7 @@ def _detect_employee_vendor_contributor_links(session) -> int:
         }
 
         severity = "medium"
-        if total_contributions >= 10000 or float(payment_stats.total) >= 500000:
+        if total_contributions >= 10000 or float(stats.total) >= 500000:
             severity = "high"
 
         alert_id = create_alert(
@@ -302,7 +349,7 @@ def _detect_employee_vendor_contributor_links(session) -> int:
             description=(
                 f"Employee '{employee.name}' is linked to vendor '{vendor.name}' "
                 f"(match type: {match.match_type}, confidence: {match.confidence_score:.0%}). "
-                f"The vendor has received ${payment_stats.total:,.2f} in payments "
+                f"The vendor has received ${stats.total:,.2f} in payments "
                 f"and appears to have made ${total_contributions:,.2f} in campaign contributions. "
                 f"This triangular relationship warrants investigation for potential "
                 f"conflicts of interest or pay-to-play schemes."
@@ -320,83 +367,89 @@ def _detect_employee_vendor_contributor_links(session) -> int:
 
 def _detect_circular_patterns(session) -> int:
     """Detect potential circular payment patterns between related entities."""
+    from texasaudit.database import Agency
+
     alerts_created = 0
 
-    # Find vendor pairs with reciprocal relationships
-    # (e.g., Vendor A pays Agency X, Vendor B pays Agency Y,
-    #  but A and B are related)
-
-    # Get all vendor relationships
+    # Get all high-confidence vendor relationships
     relationships = session.query(VendorRelationship).filter(
-        VendorRelationship.confidence_score >= 0.7  # High confidence only
+        VendorRelationship.confidence_score >= 0.7
     ).all()
 
+    if not relationships:
+        return 0
+
+    # Collect all vendor IDs from relationships
+    all_vendor_ids = set()
     for rel in relationships:
-        vendor1 = session.get(Vendor, rel.vendor_id_1)
-        vendor2 = session.get(Vendor, rel.vendor_id_2)
+        all_vendor_ids.add(rel.vendor_id_1)
+        all_vendor_ids.add(rel.vendor_id_2)
+
+    if not all_vendor_ids:
+        return 0
+
+    print(f"      Analyzing {len(relationships):,} vendor relationships...")
+
+    # Pre-load all vendors
+    vendors_by_id = {v.id: v for v in session.query(Vendor).filter(
+        Vendor.id.in_(all_vendor_ids)
+    ).all()}
+
+    # Pre-load all agencies
+    agencies = session.query(Agency).all()
+    agencies_by_id = {a.id: a for a in agencies}
+
+    # Pre-compute: for each vendor, which agencies paid them and how much
+    # {vendor_id: {agency_id: total_amount}}
+    vendor_agency_payments = defaultdict(lambda: defaultdict(Decimal))
+
+    payments = session.query(
+        Payment.vendor_id,
+        Payment.agency_id,
+        func.sum(Payment.amount).label("total")
+    ).filter(
+        Payment.vendor_id.in_(all_vendor_ids),
+        Payment.agency_id.isnot(None),
+    ).group_by(
+        Payment.vendor_id, Payment.agency_id
+    ).all()
+
+    for p in payments:
+        vendor_agency_payments[p.vendor_id][p.agency_id] = p.total
+
+    # Now analyze each relationship using pre-computed data
+    for rel in relationships:
+        vendor1 = vendors_by_id.get(rel.vendor_id_1)
+        vendor2 = vendors_by_id.get(rel.vendor_id_2)
 
         if not vendor1 or not vendor2:
             continue
 
-        # Find agencies that paid both vendors
-        common_agencies = session.query(
-            Payment.agency_id,
-            func.sum(
-                case(
-                    (Payment.vendor_id == vendor1.id, Payment.amount),
-                    else_=Decimal("0")
-                )
-            ).label("vendor1_total"),
-            func.sum(
-                case(
-                    (Payment.vendor_id == vendor2.id, Payment.amount),
-                    else_=Decimal("0")
-                )
-            ).label("vendor2_total"),
-        ).filter(
-            or_(
-                Payment.vendor_id == vendor1.id,
-                Payment.vendor_id == vendor2.id,
-            ),
-            Payment.agency_id.isnot(None),
-        ).group_by(
-            Payment.agency_id
-        ).having(
-            func.sum(
-                case(
-                    (Payment.vendor_id == vendor1.id, Payment.amount),
-                    else_=Decimal("0")
-                )
-            ) > 0,
-            func.sum(
-                case(
-                    (Payment.vendor_id == vendor2.id, Payment.amount),
-                    else_=Decimal("0")
-                )
-            ) > 0,
-        ).all()
+        # Find common agencies (agencies that paid both)
+        v1_agencies = set(vendor_agency_payments[vendor1.id].keys())
+        v2_agencies = set(vendor_agency_payments[vendor2.id].keys())
+        common_agency_ids = v1_agencies & v2_agencies
 
-        if not common_agencies:
+        if not common_agency_ids:
             continue
 
         # Calculate totals
-        total_v1 = sum(float(a.vendor1_total or 0) for a in common_agencies)
-        total_v2 = sum(float(a.vendor2_total or 0) for a in common_agencies)
+        total_v1 = sum(float(vendor_agency_payments[vendor1.id][aid]) for aid in common_agency_ids)
+        total_v2 = sum(float(vendor_agency_payments[vendor2.id][aid]) for aid in common_agency_ids)
 
         # Must be significant amounts
         if total_v1 < 50000 or total_v2 < 50000:
             continue
 
-        # Get agency details
-        from texasaudit.database import Agency
+        # Build agency details
         agency_details = []
-        for a in common_agencies:
-            agency = session.get(Agency, a.agency_id)
+        for aid in common_agency_ids:
+            agency = agencies_by_id.get(aid)
             if agency:
                 agency_details.append({
                     "name": agency.name,
-                    "vendor1_payments": float(a.vendor1_total),
-                    "vendor2_payments": float(a.vendor2_total),
+                    "vendor1_payments": float(vendor_agency_payments[vendor1.id][aid]),
+                    "vendor2_payments": float(vendor_agency_payments[vendor2.id][aid]),
                 })
 
         evidence = {
@@ -406,14 +459,14 @@ def _detect_circular_patterns(session) -> int:
             "vendor2_name": vendor2.name,
             "relationship_type": rel.relationship_type,
             "relationship_confidence": float(rel.confidence_score or 0),
-            "common_agency_count": len(common_agencies),
+            "common_agency_count": len(common_agency_ids),
             "vendor1_total": total_v1,
             "vendor2_total": total_v2,
             "agencies": agency_details,
         }
 
         severity = "medium"
-        if len(common_agencies) >= 3 or (total_v1 + total_v2) >= 1000000:
+        if len(common_agency_ids) >= 3 or (total_v1 + total_v2) >= 1000000:
             severity = "high"
 
         alert_id = create_alert(
@@ -423,7 +476,7 @@ def _detect_circular_patterns(session) -> int:
             description=(
                 f"Related vendors '{vendor1.name}' and '{vendor2.name}' "
                 f"({rel.relationship_type}) both receive payments from "
-                f"{len(common_agencies)} common agencies. "
+                f"{len(common_agency_ids)} common agencies. "
                 f"Vendor 1: ${total_v1:,.2f}, Vendor 2: ${total_v2:,.2f}. "
                 f"This pattern may indicate bid rotation, market allocation, "
                 f"or coordinated fraud."

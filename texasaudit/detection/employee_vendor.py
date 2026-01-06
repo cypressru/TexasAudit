@@ -6,13 +6,14 @@ Detects potential conflicts of interest where:
 - Employee addresses match vendor addresses
 - Employees may be receiving payments through vendor entities
 
-Uses parallel processing for efficient matching at scale.
+Uses multiprocessing for efficient CPU-bound fuzzy matching at scale.
 """
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from decimal import Decimal
 from typing import Optional
-import threading
+import multiprocessing
+import os
 
 from rapidfuzz import fuzz, process
 from sqlalchemy import func
@@ -22,6 +23,10 @@ from texasaudit.database import (
 )
 from texasaudit.normalization import normalize_address
 from texasaudit.alerts import create_alert
+
+
+# Detect available CPU cores
+CPU_COUNT = os.cpu_count() or 4
 
 
 def detect(thresholds: dict) -> int:
@@ -50,11 +55,38 @@ def detect(thresholds: dict) -> int:
     return alerts_created
 
 
-def _match_by_name_parallel(session, threshold: float, batch_size: int = 500, max_workers: int = 4) -> int:
-    """Find employees whose names match vendor names using parallel processing."""
+def _process_employee_batch(args):
+    """Worker function for multiprocessing - finds name matches for a batch of employees."""
+    employee_data, vendor_names, threshold = args
+    batch_matches = []
+
+    for emp_id, emp_name, emp_name_norm in employee_data:
+        if not emp_name_norm:
+            continue
+
+        # Find similar vendor names using rapidfuzz
+        matches = process.extract(
+            emp_name_norm,
+            vendor_names,
+            scorer=fuzz.ratio,
+            score_cutoff=int(threshold * 100),
+            limit=5,
+        )
+
+        for vendor_name, score, _ in matches:
+            batch_matches.append({
+                "emp_id": emp_id,
+                "emp_name": emp_name,
+                "vendor_name_norm": vendor_name,
+                "confidence": score / 100.0,
+            })
+
+    return batch_matches
+
+
+def _match_by_name_parallel(session, threshold: float, batch_size: int = 1000) -> int:
+    """Find employees whose names match vendor names using multiprocessing."""
     alerts_created = 0
-    match_lock = threading.Lock()
-    matches_found = []
 
     # Load all data upfront
     employees = session.query(Employee).filter(
@@ -68,13 +100,18 @@ def _match_by_name_parallel(session, threshold: float, batch_size: int = 500, ma
     if not employees or not vendors:
         return 0
 
-    print(f"      Comparing {len(employees):,} employees × {len(vendors):,} vendors...")
+    # Use most CPU cores but leave 1-2 free for system
+    num_workers = max(1, CPU_COUNT - 1)
+    print(f"      Comparing {len(employees):,} employees × {len(vendors):,} vendors ({num_workers} cores)...")
 
-    # Build vendor lookup structures
+    # Extract primitive data for multiprocessing (can't pickle SQLAlchemy objects)
+    employee_data = [(e.id, e.name, e.name_normalized) for e in employees]
+    vendor_names = [v.name_normalized for v in vendors]
+
+    # Build vendor lookup by normalized name
     vendor_by_name = {v.name_normalized: v for v in vendors}
-    vendor_names = list(vendor_by_name.keys())
 
-    # Pre-compute vendor payment stats (single query instead of per-match)
+    # Pre-compute vendor payment stats (single query)
     vendor_payment_stats = {}
     payment_stats = session.query(
         Payment.vendor_id,
@@ -92,59 +129,40 @@ def _match_by_name_parallel(session, threshold: float, batch_size: int = 500, ma
             "last_date": stat.last_date,
         }
 
-    # Process employees in batches
-    def process_batch(employee_batch):
-        """Process a batch of employees for name matching."""
-        batch_matches = []
-
-        for employee in employee_batch:
-            emp_name = employee.name_normalized
-            if not emp_name:
-                continue
-
-            # Find similar vendor names using rapidfuzz
-            matches = process.extract(
-                emp_name,
-                vendor_names,
-                scorer=fuzz.ratio,
-                score_cutoff=int(threshold * 100),
-                limit=5,
-            )
-
-            for vendor_name, score, _ in matches:
-                confidence = score / 100.0
-                vendor = vendor_by_name[vendor_name]
-
-                batch_matches.append({
-                    "employee": employee,
-                    "vendor": vendor,
-                    "confidence": confidence,
-                })
-
-        return batch_matches
-
-    # Split employees into batches
+    # Split employees into batches for parallel processing
     employee_batches = [
-        employees[i:i + batch_size]
-        for i in range(0, len(employees), batch_size)
+        employee_data[i:i + batch_size]
+        for i in range(0, len(employee_data), batch_size)
     ]
 
-    # Process batches in parallel
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_batch, batch) for batch in employee_batches]
+    # Prepare args for worker processes
+    work_args = [(batch, vendor_names, threshold) for batch in employee_batches]
+
+    # Process batches in parallel using multiple CPU cores
+    matches_found = []
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = [executor.submit(_process_employee_batch, args) for args in work_args]
 
         for future in as_completed(futures):
             batch_matches = future.result()
-            with match_lock:
-                matches_found.extend(batch_matches)
+            matches_found.extend(batch_matches)
 
     print(f"      Found {len(matches_found):,} potential matches, creating alerts...")
 
-    # Now create alerts (must be done in main thread for session safety)
+    # Build employee lookup for alert creation
+    employee_by_id = {e.id: e for e in employees}
+
+    # Now create alerts (must be done in main process for database safety)
     for match in matches_found:
-        employee = match["employee"]
-        vendor = match["vendor"]
+        emp_id = match["emp_id"]
+        vendor_name_norm = match["vendor_name_norm"]
         confidence = match["confidence"]
+
+        employee = employee_by_id.get(emp_id)
+        vendor = vendor_by_name.get(vendor_name_norm)
+
+        if not employee or not vendor:
+            continue
 
         # Get payment stats
         stats = vendor_payment_stats.get(vendor.id)

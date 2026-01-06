@@ -106,17 +106,21 @@ class TxDOTBidIngestor(BaseIngestor):
     def _process_bid_batch(self, records: list[dict]) -> int:
         """Process a batch of bid records."""
         count = 0
+        seen_bids = set()  # Track bids within this batch
 
         with get_session() as session:
             for record in records:
-                bid = self._create_bid(session, record)
+                bid = self._create_bid(session, record, seen_bids)
                 if bid:
                     count += 1
 
         return count
 
-    def _create_bid(self, session, record: dict) -> Optional[ConstructionBid]:
+    def _create_bid(self, session, record: dict, seen_bids: set = None) -> Optional[ConstructionBid]:
         """Create a bid record from TxDOT data."""
+        if seen_bids is None:
+            seen_bids = set()
+
         # Extract project ID (CSJ)
         project_id = record.get("control_section_job_csj", "")
         if not project_id:
@@ -124,13 +128,23 @@ class TxDOTBidIngestor(BaseIngestor):
         if not project_id:
             return None
 
-        # Extract contractor name
-        contractor_name = record.get("bidder_name", "")
+        # Extract contractor name (field is vendor_name in this dataset)
+        contractor_name = record.get("vendor_name", "")
         if not contractor_name:
             return None
 
-        # Check for duplicate
+        # Skip engineer's estimates (not actual bids)
+        if "engineer" in contractor_name.lower() and "estimate" in contractor_name.lower():
+            return None
+
+        # Check for duplicate within current batch
         contractor_normalized = normalize_vendor_name(contractor_name)
+        bid_key = f"{project_id}|{contractor_normalized}"
+        if bid_key in seen_bids:
+            return None
+        seen_bids.add(bid_key)
+
+        # Check for duplicate in database
         existing = session.query(ConstructionBid).filter(
             ConstructionBid.project_id == project_id,
             ConstructionBid.contractor_normalized == contractor_normalized,
@@ -149,19 +163,19 @@ class TxDOTBidIngestor(BaseIngestor):
 
         # Parse engineer estimate
         engineer_estimate = None
-        est_str = record.get("a_b_engineer_s_estimate_amount", "")
+        est_str = record.get("sealed_engineer_s_estimate", "") or record.get("sealed_engineer_s_estimate_1", "")
         if est_str:
             try:
                 engineer_estimate = Decimal(str(est_str).replace(",", "").replace("$", ""))
             except:
                 pass
 
-        # Parse bid rank
+        # Parse bid rank (can be "EE" for engineer estimate, so handle non-numeric)
         bid_rank = None
         rank_str = record.get("bid_rank_sequence_number", "")
         if rank_str:
             try:
-                bid_rank = int(rank_str)
+                bid_rank = int(float(rank_str))
             except:
                 pass
 
@@ -195,8 +209,8 @@ class TxDOTBidIngestor(BaseIngestor):
             letting_date=letting_date,
             county=record.get("county", ""),
             district=record.get("district_division", ""),
-            project_description=record.get("project_description", ""),
-            work_type=record.get("work_type", ""),
+            project_description=record.get("short_description", "") or record.get("project_name", ""),
+            work_type=record.get("project_type", ""),
             source="txdot",
             raw_data=record,
         )
