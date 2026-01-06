@@ -1,0 +1,80 @@
+# TexasAudit Configuration
+# Copy this to config.yaml and customize for your environment
+# API keys can also be set via environment variables or .env file
+
+database:
+  # Option 1: Unix socket (default for local PostgreSQL on Linux)
+  host: /run/postgresql
+
+  # Option 2: TCP connection (uncomment and set password)
+  # host: localhost
+  # password: "your_password"
+
+  port: 5432
+  name: texasaudit
+  user: your_username  # Will be set automatically by run.sh
+
+api_keys:
+  # Socrata app token for data.texas.gov (optional, improves rate limits)
+  # Get one at: https://data.texas.gov/profile/edit/developer_settings
+  # Or set TEXASAUDIT_SOCRATA_TOKEN environment variable
+  socrata: ""
+
+  # SAM.gov API key (required for automatic exclusions download)
+  # Get one at: https://sam.gov/data-services/
+  # Or set SAM_API_KEY environment variable
+  # sam_gov: ""
+
+sync:
+  # How often to run automatic syncs (in hours)
+  interval_hours: 6
+
+  # Data sources to sync
+  sources:
+    - cmbl               # Centralized Master Bidders List
+    - socrata_payments   # State payments from data.texas.gov
+    - lbb_contracts      # LBB contract database
+    - usaspending        # Federal grants/contracts
+    - txsmartbuy         # Purchase orders
+    - sam_exclusions     # Federal debarment list
+    - employee_salaries  # State employee salaries
+    - campaign_finance   # Campaign contributions
+    - tax_permits        # Sales tax permits
+
+detection:
+  thresholds:
+    # Contract splitting detection (clustering below thresholds)
+    contract_splitting_min: 45000
+    contract_splitting_max: 50000
+    contract_splitting_count: 3
+    contract_splitting_months: 12
+
+    # ESBD threshold
+    esbd_threshold: 25000
+
+    # Duplicate payment window
+    duplicate_payment_window_days: 30
+
+    # Vendor name similarity for clustering (0-1)
+    vendor_name_similarity: 0.85
+
+    # Debarment name matching threshold
+    debarment_name_similarity: 0.90
+
+    # Large payment to new vendor
+    new_vendor_large_payment: 100000
+
+    # Confidentiality rate threshold
+    confidentiality_rate_threshold: 0.20
+
+web:
+  host: 127.0.0.1
+  port: 5000
+  debug: false
+
+data:
+  # Directory for downloaded files and exports
+  data_dir: "./data"
+
+  # Starting fiscal year for historical data (null = all available)
+  start_fiscal_year: null

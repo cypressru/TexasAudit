@@ -1,0 +1,45 @@
+MIT License
+
+Copyright (c) 2024-2026 TexasAudit Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+DISCLAIMER
+
+This software is provided for research, educational, and government
+transparency purposes. It is designed to help identify potential anomalies
+in public spending data that may warrant further investigation.
+
+The detection of a "match" or "alert" by this software does NOT constitute
+evidence of wrongdoing. Many alerts will be false positives due to:
+- Common business names
+- Data entry errors
+- Legitimate business relationships
+- Outdated exclusion records
+
+Users of this software are responsible for:
+1. Verifying all findings through independent investigation
+2. Following applicable laws regarding public records access
+3. Respecting privacy and due process rights
+4. Using the data ethically and responsibly
+
+The authors and contributors of this software are not responsible for any
+actions taken based on its output.
