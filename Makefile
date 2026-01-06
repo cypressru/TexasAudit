@@ -1,11 +1,11 @@
-# TexasAudit Makefile
+# Fraudit Makefile
 # Common commands for development and operations
 
 .PHONY: help install dev setup init sync detect tui clean test lint
 
 # Default target
 help:
-	@echo "TexasAudit - Government Spending Fraud Detection"
+	@echo "Fraudit - Government Spending Fraud Detection"
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""
@@ -45,38 +45,38 @@ dev: $(VENV)/bin/activate
 # Setup target
 setup: install
 	@echo "Creating database..."
-	@createdb texasaudit 2>/dev/null || echo "Database already exists"
+	@createdb fraudit 2>/dev/null || echo "Database already exists"
 	@echo "Initializing tables..."
-	$(PYTHON) -c "from texasaudit.database import init_db; init_db()"
+	$(PYTHON) -c "from fraudit.database import init_db; init_db()"
 	@echo "Setup complete! Run 'make sync' to fetch data."
 
 init:
-	$(PYTHON) -c "from texasaudit.database import init_db; init_db()"
+	$(PYTHON) -c "from fraudit.database import init_db; init_db()"
 
 # Operation targets
 sync:
-	$(PYTHON) -c "from texasaudit.ingestion.runner import run_sync; run_sync(smart=True)"
+	$(PYTHON) -c "from fraudit.ingestion.runner import run_sync; run_sync(smart=True)"
 
 sync-full:
-	$(PYTHON) -c "from texasaudit.ingestion.runner import run_sync; run_sync(smart=False)"
+	$(PYTHON) -c "from fraudit.ingestion.runner import run_sync; run_sync(smart=False)"
 
 detect:
-	$(VENV)/bin/texasaudit analyze run
+	$(VENV)/bin/fraudit analyze run
 
 tui:
-	$(VENV)/bin/texasaudit tui
+	$(VENV)/bin/fraudit tui
 
 # Development targets
 test:
 	$(PYTHON) -m pytest tests/ -v
 
 lint:
-	$(PYTHON) -m ruff check texasaudit/
-	$(PYTHON) -m black --check texasaudit/
+	$(PYTHON) -m ruff check fraudit/
+	$(PYTHON) -m black --check fraudit/
 
 format:
-	$(PYTHON) -m black texasaudit/
-	$(PYTHON) -m ruff check --fix texasaudit/
+	$(PYTHON) -m black fraudit/
+	$(PYTHON) -m ruff check --fix fraudit/
 
 # Cleanup
 clean:

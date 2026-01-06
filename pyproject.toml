@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "texasaudit"
+name = "fraudit"
 version = "0.1.0"
 description = "Texas government spending fraud detection and analysis system"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "TexasAudit Contributors"}
+    {name = "Fraudit Contributors"}
 ]
 keywords = [
     "fraud-detection",
@@ -80,20 +80,20 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/texasaudit"
-Documentation = "https://github.com/yourusername/texasaudit#readme"
-Repository = "https://github.com/yourusername/texasaudit.git"
-Issues = "https://github.com/yourusername/texasaudit/issues"
+Homepage = "https://github.com/yourusername/fraudit"
+Documentation = "https://github.com/yourusername/fraudit#readme"
+Repository = "https://github.com/yourusername/fraudit.git"
+Issues = "https://github.com/yourusername/fraudit/issues"
 
 [project.scripts]
-texasaudit = "texasaudit.cli:cli"
+fraudit = "fraudit.cli:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["texasaudit*"]
+include = ["fraudit*"]
 
 [tool.setuptools.package-data]
-texasaudit = [
+fraudit = [
     "pia/templates/**/*",
 ]
 

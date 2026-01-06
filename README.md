@@ -1,8 +1,8 @@
-# TexasAudit
+# Fraudit
 
 **Government Spending Fraud Detection System for Texas**
 
-TexasAudit is an open-source tool that aggregates Texas state government spending data from multiple sources and applies fraud detection algorithms to identify suspicious patterns, duplicate payments, contract splitting, and vendors on federal exclusion lists.
+Fraudit is an open-source tool that aggregates Texas state government spending data from multiple sources and applies fraud detection algorithms to identify suspicious patterns, duplicate payments, contract splitting, and vendors on federal exclusion lists.
 
 ## Features
 
@@ -39,8 +39,8 @@ TexasAudit is an open-source tool that aggregates Texas state government spendin
 ### One-Line Install (Linux)
 
 ```bash
-git clone https://github.com/yourusername/texasaudit.git
-cd texasaudit
+git clone https://github.com/yourusername/fraudit.git
+cd fraudit
 ./run.sh
 ```
 
@@ -54,7 +54,7 @@ The setup script will:
 
 ### API Keys
 
-TexasAudit works best with these API keys (the setup will prompt you):
+Fraudit works best with these API keys (the setup will prompt you):
 
 | Key | Required | Purpose | Get It |
 |-----|----------|---------|--------|
@@ -86,26 +86,26 @@ Keyboard shortcuts:
 source .venv/bin/activate
 
 # Sync data sources
-texasaudit sync run              # Smart sync (skip completed)
-texasaudit sync run --all        # Force full sync
-texasaudit sync run -s cmbl      # Sync specific source
+fraudit sync run              # Smart sync (skip completed)
+fraudit sync run --all        # Force full sync
+fraudit sync run -s cmbl      # Sync specific source
 
 # Run fraud detection
-texasaudit analyze run           # Run all detection rules
-texasaudit analyze run -r debarment  # Run specific rule
-texasaudit analyze rules         # List all detection rules
+fraudit analyze run           # Run all detection rules
+fraudit analyze run -r debarment  # Run specific rule
+fraudit analyze rules         # List all detection rules
 
 # Manage alerts
-texasaudit alerts list
-texasaudit alerts list --severity high
-texasaudit alerts show 123
+fraudit alerts list
+fraudit alerts list --severity high
+fraudit alerts show 123
 
 # Search vendors
-texasaudit vendors search "ACME"
-texasaudit vendors show 1234567890000
+fraudit vendors search "ACME"
+fraudit vendors show 1234567890000
 
 # View configuration
-texasaudit config --show
+fraudit config --show
 ```
 
 ## Installation (Manual)
@@ -120,8 +120,8 @@ texasaudit config --show
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/texasaudit.git
-cd texasaudit
+git clone https://github.com/yourusername/fraudit.git
+cd fraudit
 
 # Create virtual environment
 python -m venv .venv
@@ -132,7 +132,7 @@ pip install -e .
 
 # Set up PostgreSQL
 sudo systemctl start postgresql
-createdb texasaudit
+createdb fraudit
 
 # Copy and edit config
 cp config.yaml.example config.yaml
@@ -143,14 +143,14 @@ export SAM_API_KEY="your_key"
 export TEXASAUDIT_SOCRATA_TOKEN="your_token"
 
 # Initialize database
-texasaudit init
+fraudit init
 
 # Run sync and analysis
-texasaudit sync run
-texasaudit analyze run
+fraudit sync run
+fraudit analyze run
 
 # Start UI
-texasaudit tui
+fraudit tui
 ```
 
 ## Configuration
@@ -164,7 +164,7 @@ TEXASAUDIT_SOCRATA_TOKEN=your_socrata_token
 
 # Database (optional, defaults work for local PostgreSQL)
 TEXASAUDIT_DB_HOST=/run/postgresql
-TEXASAUDIT_DB_NAME=texasaudit
+TEXASAUDIT_DB_NAME=fraudit
 TEXASAUDIT_DB_USER=your_username
 ```
 
@@ -174,7 +174,7 @@ Or edit `config.yaml`:
 database:
   host: /run/postgresql  # Unix socket path or hostname
   port: 5432
-  name: texasaudit
+  name: fraudit
   user: your_username
 
 sync:
@@ -194,8 +194,8 @@ detection:
 ## Project Structure
 
 ```
-texasaudit/
-├── texasaudit/
+fraudit/
+├── fraudit/
 │   ├── ingestion/      # Data source ingestors
 │   │   ├── cmbl.py           # Centralized Master Bidders List
 │   │   ├── socrata.py        # data.texas.gov payments

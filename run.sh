@@ -1,5 +1,5 @@
 #!/bin/bash
-# Texas Audit - Startup Script
+# Fraudit - Startup Script
 # Handles PostgreSQL, database setup, API keys, and launching the application
 
 set -e
@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 
 echo -e "${CYAN}"
 echo "╔════════════════════════════════════════════════════════════╗"
-echo "║                    TEXAS AUDIT                             ║"
+echo "║                      FRAUDIT                               ║"
 echo "║        Government Spending Fraud Detection System          ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -83,7 +83,7 @@ prompt_api_key() {
 # Function to check and configure API keys
 configure_api_keys() {
     echo -e "\n${CYAN}[API Configuration]${NC}"
-    echo "TexasAudit can collect data from multiple sources."
+    echo "Fraudit can collect data from multiple sources."
     echo "Some sources require API keys for full functionality."
     echo ""
 
@@ -94,7 +94,7 @@ configure_api_keys() {
     local all_configured=true
 
     # 1. Socrata (data.texas.gov) App Token
-    local socrata_token="${TEXASAUDIT_SOCRATA_TOKEN:-}"
+    local socrata_token="${FRAUDIT_SOCRATA_TOKEN:-}"
     if [ -z "$socrata_token" ]; then
         # Check config.yaml
         socrata_token=$(grep -A1 "api_keys:" "$CONFIG_FILE" 2>/dev/null | grep "socrata:" | sed 's/.*socrata: *"\([^"]*\)".*/\1/' | head -1)
@@ -102,7 +102,7 @@ configure_api_keys() {
 
     prompt_api_key \
         "Data.Texas.Gov (Socrata) App Token" \
-        "TEXASAUDIT_SOCRATA_TOKEN" \
+        "FRAUDIT_SOCRATA_TOKEN" \
         "$socrata_token" \
         "Increases rate limits for state spending data downloads." \
         "Get one at: https://data.texas.gov/profile/edit/developer_settings" \
@@ -271,11 +271,11 @@ if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$CURRENT_
     echo -e "${GREEN}Role created${NC}"
 fi
 
-if psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw texasaudit; then
-    echo -e "${GREEN}Database 'texasaudit' exists${NC}"
+if psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw fraudit; then
+    echo -e "${GREEN}Database 'fraudit' exists${NC}"
 else
-    echo -e "${YELLOW}Creating database 'texasaudit'...${NC}"
-    createdb texasaudit
+    echo -e "${YELLOW}Creating database 'fraudit'...${NC}"
+    createdb fraudit
     echo -e "${GREEN}Database created${NC}"
 fi
 
@@ -314,7 +314,7 @@ fi
 SOCRATA_OK=false
 SAM_OK=false
 
-if [ -n "${TEXASAUDIT_SOCRATA_TOKEN:-}" ]; then
+if [ -n "${FRAUDIT_SOCRATA_TOKEN:-}" ]; then
     SOCRATA_OK=true
 fi
 
@@ -348,15 +348,15 @@ mkdir -p "$SCRIPT_DIR/data/reports"
 # Step 5: Initialize database tables
 echo -e "\n${CYAN}[5/6] Initializing database tables...${NC}"
 
-TABLE_COUNT=$(psql -d texasaudit -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null || echo "0")
+TABLE_COUNT=$(psql -d fraudit -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null || echo "0")
 EXPECTED_TABLES=17  # Updated count with construction_bids, hhs_contracts
 
 if [ "$TABLE_COUNT" -ge "$EXPECTED_TABLES" ]; then
     echo -e "${GREEN}All database tables exist ($TABLE_COUNT tables)${NC}"
 else
     echo -e "${YELLOW}Creating/updating tables ($TABLE_COUNT -> $EXPECTED_TABLES)...${NC}"
-    python -c "from texasaudit.database import init_db; init_db()"
-    NEW_COUNT=$(psql -d texasaudit -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null || echo "0")
+    python -c "from fraudit.database import init_db; init_db()"
+    NEW_COUNT=$(psql -d fraudit -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" 2>/dev/null || echo "0")
     echo -e "${GREEN}Tables ready ($NEW_COUNT tables)${NC}"
 fi
 
@@ -367,13 +367,13 @@ fi
 smart_sync() {
     echo -e "${CYAN}Running parallel sync with live progress...${NC}"
     echo ""
-    python -c "from texasaudit.ingestion.runner import run_sync; run_sync(smart=True)"
+    python -c "from fraudit.ingestion.runner import run_sync; run_sync(smart=True)"
 }
 
 parallel_full_sync() {
     echo -e "${CYAN}Running full parallel sync with live progress...${NC}"
     echo ""
-    python -c "from texasaudit.ingestion.runner import run_sync; run_sync(smart=False)"
+    python -c "from fraudit.ingestion.runner import run_sync; run_sync(smart=False)"
 }
 
 # Step 6: Launch options
@@ -396,26 +396,26 @@ case $choice in
         echo -e "\n${GREEN}Starting Terminal UI...${NC}"
         echo "Press 'q' to quit, 'd' for dashboard, 'v' for vendors, 'a' for alerts"
         echo ""
-        texasaudit tui
+        fraudit tui
         ;;
     2)
         smart_sync
         echo -e "\n${YELLOW}Running fraud detection...${NC}"
-        texasaudit analyze run
+        fraudit analyze run
         echo -e "\n${GREEN}Starting Terminal UI...${NC}"
-        texasaudit tui
+        fraudit tui
         ;;
     3)
         smart_sync
         echo -e "\n${YELLOW}Running fraud detection...${NC}"
-        texasaudit analyze run
+        fraudit analyze run
         echo -e "\n${GREEN}Sync complete!${NC}"
         echo "Run './run.sh' again to start the UI"
         ;;
     4)
         parallel_full_sync
         echo -e "\n${YELLOW}Running fraud detection...${NC}"
-        texasaudit analyze run
+        fraudit analyze run
         echo -e "\n${GREEN}Full sync complete!${NC}"
         echo "Run './run.sh' again to start the UI"
         ;;
